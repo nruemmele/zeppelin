@@ -19,6 +19,11 @@ package org.apache.zeppelin.notebook;
 
 import static java.lang.String.format;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import java.io.IOException;
 import java.util.Date;
 import java.util.HashMap;
@@ -27,10 +32,10 @@ import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-
 import org.apache.commons.lang.StringUtils;
 import org.apache.zeppelin.common.JsonSerializable;
 import org.apache.zeppelin.completer.CompletionType;
@@ -47,9 +52,9 @@ import org.apache.zeppelin.interpreter.InterpreterSetting;
 import org.apache.zeppelin.interpreter.InterpreterSettingManager;
 import org.apache.zeppelin.interpreter.remote.RemoteAngularObjectRegistry;
 import org.apache.zeppelin.interpreter.thrift.InterpreterCompletion;
+import org.apache.zeppelin.notebook.repo.NotebookRepo;
 import org.apache.zeppelin.notebook.repo.NotebookRepoSync;
 import org.apache.zeppelin.notebook.repo.NotebookRepoWithVersionControl;
-import org.apache.zeppelin.notebook.repo.NotebookRepo;
 import org.apache.zeppelin.notebook.utility.IdHashes;
 import org.apache.zeppelin.scheduler.Job;
 import org.apache.zeppelin.scheduler.Job.Status;
@@ -58,11 +63,6 @@ import org.apache.zeppelin.user.AuthenticationInfo;
 import org.apache.zeppelin.user.Credentials;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 
 /**
  * Binded interpreters for a note
@@ -103,6 +103,7 @@ public class Note implements ParagraphJobListener, JsonSerializable {
   private transient NotebookRepo repo;
   private transient SearchService index;
   private transient ScheduledFuture delayedPersist;
+  private transient Object delayedPersistLock = new Object();
   private transient NoteEventListener noteEventListener;
   private transient Credentials credentials;
   private transient NoteNameListener noteNameListener;
@@ -303,15 +304,25 @@ public class Note implements ParagraphJobListener, JsonSerializable {
     this.repo = repo;
   }
 
-  void setRevisionSupported(NotebookRepo repo) {
-    if (repo instanceof NotebookRepoSync) {
-      getConfig()
-          .put("isRevisionSupported", ((NotebookRepoSync) repo).isRevisionSupportedInDefaultRepo());
-    } else if (repo instanceof NotebookRepoWithVersionControl) {
-      getConfig().put("isRevisionSupported", true);
-    } else {
-      getConfig().put("isRevisionSupported", false);
+  public Boolean isCronSupported(ZeppelinConfiguration config) {
+    if (config.isZeppelinNotebookCronEnable()) {
+      config.getZeppelinNotebookCronFolders();
+      if (config.getZeppelinNotebookCronFolders() == null) {
+        return true;
+      } else {
+        for (String folder : config.getZeppelinNotebookCronFolders().split(",")) {
+          folder = folder.replaceAll("\\*", "\\.*").replaceAll("\\?", "\\.");
+          if (getName().matches(folder)) {
+            return true;
+          }
+        }
+      }
     }
+    return false;
+  }
+
+  public void setCronSupported(ZeppelinConfiguration config) {
+    getConfig().put("isZeppelinNotebookCronEnable", isCronSupported(config));
   }
 
   public void setIndex(SearchService index) {
@@ -343,7 +354,7 @@ public class Note implements ParagraphJobListener, JsonSerializable {
    *
    * @param srcParagraph source paragraph
    */
-  void addCloneParagraph(Paragraph srcParagraph) {
+  void addCloneParagraph(Paragraph srcParagraph, AuthenticationInfo subject) {
 
     // Keep paragraph original ID
     final Paragraph newParagraph = new Paragraph(srcParagraph.getId(), this, this, factory);
@@ -352,11 +363,17 @@ public class Note implements ParagraphJobListener, JsonSerializable {
     Map<String, Object> param = srcParagraph.settings.getParams();
     LinkedHashMap<String, Input> form = srcParagraph.settings.getForms();
 
+    logger.debug("srcParagraph user: " + srcParagraph.getUser());
+    
+    newParagraph.setAuthenticationInfo(subject);
     newParagraph.setConfig(config);
     newParagraph.settings.setParams(param);
     newParagraph.settings.setForms(form);
     newParagraph.setText(srcParagraph.getText());
     newParagraph.setTitle(srcParagraph.getTitle());
+    
+    logger.debug("newParagraph user: " + newParagraph.getUser());
+
 
     try {
       Gson gson = new Gson();
@@ -623,15 +640,18 @@ public class Note implements ParagraphJobListener, JsonSerializable {
   }
 
   /**
-   * Run all paragraphs sequentially.
+   * Run all paragraphs sequentially. Only used for CronJob
    */
   public synchronized void runAll() {
     String cronExecutingUser = (String) getConfig().get("cronExecutingUser");
+    String cronExecutingRoles = (String) getConfig().get("cronExecutingRoles");
     if (null == cronExecutingUser) {
       cronExecutingUser = "anonymous";
     }
-    AuthenticationInfo authenticationInfo = new AuthenticationInfo();
-    authenticationInfo.setUser(cronExecutingUser);
+    AuthenticationInfo authenticationInfo = new AuthenticationInfo(
+        cronExecutingUser,
+        StringUtils.isEmpty(cronExecutingRoles) ? null : cronExecutingRoles,
+        null);
     runAll(authenticationInfo, true);
   }
 
@@ -837,7 +857,7 @@ public class Note implements ParagraphJobListener, JsonSerializable {
   }
 
   private void startDelayedPersistTimer(int maxDelaySec, final AuthenticationInfo subject) {
-    synchronized (this) {
+    synchronized (delayedPersistLock) {
       if (delayedPersist != null) {
         return;
       }
@@ -857,11 +877,10 @@ public class Note implements ParagraphJobListener, JsonSerializable {
   }
 
   private void stopDelayedPersistTimer() {
-    synchronized (this) {
+    synchronized (delayedPersistLock) {
       if (delayedPersist == null) {
         return;
       }
-
       delayedPersist.cancel(false);
     }
   }

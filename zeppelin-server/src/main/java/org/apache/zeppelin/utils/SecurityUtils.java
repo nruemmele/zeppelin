@@ -41,6 +41,7 @@ import org.apache.shiro.web.mgt.DefaultWebSecurityManager;
 import org.apache.zeppelin.conf.ZeppelinConfiguration;
 import org.apache.zeppelin.realm.ActiveDirectoryGroupRealm;
 import org.apache.zeppelin.realm.LdapRealm;
+import org.apache.zeppelin.server.ZeppelinServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,7 +56,7 @@ public class SecurityUtils {
   private static final HashSet<String> EMPTY_HASHSET = Sets.newHashSet();
   private static boolean isEnabled = false;
   private static final Logger log = LoggerFactory.getLogger(SecurityUtils.class);
-  
+
   public static void setIsEnabled(boolean value) {
     isEnabled = value;
   }
@@ -93,6 +94,11 @@ public class SecurityUtils {
     String principal;
     if (subject.isAuthenticated()) {
       principal = extractPrincipal(subject);
+      if (ZeppelinServer.notebook.getConf().isUsernameForceLowerCase()) {
+        log.debug("Converting principal name " + principal
+            + " to lower case:" + principal.toLowerCase());
+        principal = principal.toLowerCase();
+      }
     } else {
       principal = ANONYMOUS;
     }
@@ -149,7 +155,9 @@ public class SecurityUtils {
               new SimplePrincipalCollection(subject.getPrincipal(), realm.getName()),
               ((LdapRealm) realm).getContextFactory()
             );
-            roles = new HashSet<>(auth.getRoles());
+            if (auth != null) {
+              roles = new HashSet<>(auth.getRoles());
+            }
           } catch (NamingException e) {
             log.error("Can't fetch roles", e);
           }

@@ -82,6 +82,10 @@ export default class TableVisualization extends Visualization {
     return width;
   }
 
+  getSortedValue(a, b) {
+    return a > b ? 1 : a === b ? 0 : -1;
+  }
+
   createGridOptions(tableData, onRegisterApiCallback, config) {
     const rows = tableData.rows;
     const columnNames = tableData.columns.map((c) => c.name);
@@ -102,8 +106,10 @@ export default class TableVisualization extends Visualization {
       flatEntityAccess: true,
       fastWatch: false,
       treeRowHeaderAlwaysVisible: false,
+      exporterExcelFilename: 'myFile.xlsx',
 
       columnDefs: columnNames.map((colName) => {
+        const self = this;
         return {
           displayName: colName,
           name: colName,
@@ -120,6 +126,18 @@ export default class TableVisualization extends Visualization {
           `,
           minWidth: this.getColumnMinWidth(colName),
           width: '*',
+          sortingAlgorithm: function(a, b, row1, row2, sortType, gridCol) {
+            const colType = gridCol.colDef.type.toLowerCase();
+            if (colType === TableColumnType.NUMBER) {
+              return self.getSortedValue(a, b);
+            } else if (colType === TableColumnType.STRING) {
+              return self.getSortedValue(a.toString(), b.toString());
+            } else if (colType === TableColumnType.DATE) {
+              return self.getSortedValue(new Date(a), new Date(b));
+            } else {
+              return self.getSortedValue(a, b);
+            }
+          },
         };
       }),
       rowEditWaitInterval: -1, /** disable saveRow event */
@@ -158,6 +176,11 @@ export default class TableVisualization extends Visualization {
 
     if (gridElem) {
       gridElem.css('height', this.targetEl.height() - 10);
+      const gridApiId = this.getGridApiId();
+      const scope = this.getScope();
+      if(scope[gridApiId]!==undefined) {
+        scope[gridApiId].core.handleWindowResize();
+      }
     }
   }
 
@@ -283,79 +306,76 @@ export default class TableVisualization extends Visualization {
 
     const config = this.config;
     const self = this; // for closure
+    const scope = this.getScope();
+    // set gridApi for this elem
+    const gridApiId = this.getGridApiId();
+    const gridOptions = this.createGridOptions(tableData, onRegisterApiCallback, config);
+
+    const onRegisterApiCallback = (gridApi) => {
+      scope[gridApiId] = gridApi;
+      // should restore state before registering APIs
+
+      // register callbacks for change evens
+      // should persist `self.config` instead `config` (closure issue)
+      gridApi.core.on.columnVisibilityChanged(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+      gridApi.colMovable.on.columnPositionChanged(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+      gridApi.core.on.sortChanged(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+      gridApi.core.on.filterChanged(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+      gridApi.grouping.on.aggregationChanged(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+      gridApi.grouping.on.groupingChanged(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+      gridApi.treeBase.on.rowCollapsed(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+      gridApi.treeBase.on.rowExpanded(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+      gridApi.colResizable.on.columnSizeChanged(scope, () => {
+        self.persistConfigWithGridState(self.config);
+      });
+
+      // pagination doesn't follow usual life-cycle in ui-grid v4.0.4
+      // gridApi.pagination.on.paginationChanged(scope, () => { self.persistConfigWithGridState(self.config) })
+      // TBD: do we need to propagate row selection?
+      // gridApi.selection.on.rowSelectionChanged(scope, () => { self.persistConfigWithGridState(self.config) })
+      // gridApi.selection.on.rowSelectionChangedBatch(scope, () => { self.persistConfigWithGridState(self.config) })
+    };
 
     if (!gridElem) {
       // create, compile and append grid elem
       gridElem = angular.element(
         `<div id="${gridElemId}" ui-grid="${gridElemId}"
-              ui-grid-edit ui-grid-row-edit 
-              ui-grid-pagination 
+              ui-grid-edit ui-grid-row-edit
+              ui-grid-pagination
               ui-grid-selection
               ui-grid-cellNav ui-grid-pinning
               ui-grid-empty-base-layer
-              ui-grid-resize-columns 
+              ui-grid-resize-columns
               ui-grid-move-columns
               ui-grid-grouping
               ui-grid-save-state
               ui-grid-exporter></div>`);
 
       gridElem.css('height', this.targetEl.height() - 10);
-      const scope = this.getScope();
       gridElem = this._compile(gridElem)(scope);
       this.targetEl.append(gridElem);
-
-      // set gridOptions for this elem
-      const gridOptions = this.createGridOptions(tableData, onRegisterApiCallback, config);
       this.setDynamicGridOptions(gridOptions, config);
       this.addColumnMenus(gridOptions);
       scope[gridElemId] = gridOptions;
-
-      // set gridApi for this elem
-      const gridApiId = this.getGridApiId();
-      const onRegisterApiCallback = (gridApi) => {
-        scope[gridApiId] = gridApi;
-        // should restore state before registering APIs
-
-        // register callbacks for change evens
-        // should persist `self.config` instead `config` (closure issue)
-        gridApi.core.on.columnVisibilityChanged(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-        gridApi.colMovable.on.columnPositionChanged(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-        gridApi.core.on.sortChanged(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-        gridApi.core.on.filterChanged(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-        gridApi.grouping.on.aggregationChanged(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-        gridApi.grouping.on.groupingChanged(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-        gridApi.treeBase.on.rowCollapsed(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-        gridApi.treeBase.on.rowExpanded(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-        gridApi.colResizable.on.columnSizeChanged(scope, () => {
-          self.persistConfigWithGridState(self.config);
-        });
-
-        // pagination doesn't follow usual life-cycle in ui-grid v4.0.4
-        // gridApi.pagination.on.paginationChanged(scope, () => { self.persistConfigWithGridState(self.config) })
-        // TBD: do we need to propagate row selection?
-        // gridApi.selection.on.rowSelectionChanged(scope, () => { self.persistConfigWithGridState(self.config) })
-        // gridApi.selection.on.rowSelectionChangedBatch(scope, () => { self.persistConfigWithGridState(self.config) })
-      };
       gridOptions.onRegisterApi = onRegisterApiCallback;
     } else {
-      // don't need to update gridOptions.data since it's synchronized by paragraph execution
-      const gridOptions = this.getGridOptions();
+      scope[gridElemId] = gridOptions;
       this.setDynamicGridOptions(gridOptions, config);
       this.refreshGrid();
     }

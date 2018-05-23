@@ -38,6 +38,7 @@ import org.apache.zeppelin.interpreter.InterpreterHookRegistry.HookType;
 import org.apache.zeppelin.interpreter.InterpreterResult;
 import org.apache.zeppelin.interpreter.InterpreterResult.Code;
 import org.apache.zeppelin.interpreter.InterpreterResultMessage;
+import org.apache.zeppelin.interpreter.InvalidHookException;
 import org.apache.zeppelin.interpreter.LazyOpenInterpreter;
 import org.apache.zeppelin.interpreter.WrappedInterpreter;
 import org.apache.zeppelin.interpreter.thrift.InterpreterCompletion;
@@ -125,34 +126,25 @@ public class PySparkInterpreter extends Interpreter implements ExecuteResultHand
             iPySparkInterpreter.checkIPythonPrerequisite(getPythonExec(getProperties())))) {
       try {
         iPySparkInterpreter.open();
-        if (InterpreterContext.get() != null) {
-          // don't print it when it is in testing, just for easy output check in test.
-          InterpreterContext.get().out.write(("IPython is available, " +
-              "use IPython for PySparkInterpreter\n")
-              .getBytes());
-        }
-        LOGGER.info("Use IPySparkInterpreter to replace PySparkInterpreter");
+        LOGGER.info("IPython is available, Use IPySparkInterpreter to replace PySparkInterpreter");
         return;
       } catch (Exception e) {
+        iPySparkInterpreter = null;
         LOGGER.warn("Fail to open IPySparkInterpreter", e);
       }
     }
-    iPySparkInterpreter = null;
-    if (getProperty("zeppelin.pyspark.useIPython", "true").equals("true")) {
-      // don't print it when it is in testing, just for easy output check in test.
-      try {
-        InterpreterContext.get().out.write(("IPython is not available, " +
-            "use the native PySparkInterpreter\n")
-            .getBytes());
-      } catch (IOException e) {
-        LOGGER.warn("Fail to write InterpreterOutput", e);
-      }
-    }
 
+    // reset iPySparkInterpreter to null as it is not available
+    iPySparkInterpreter = null;
+    LOGGER.info("IPython is not available, use the native PySparkInterpreter\n");
     // Add matplotlib display hook
     InterpreterGroup intpGroup = getInterpreterGroup();
     if (intpGroup != null && intpGroup.getInterpreterHookRegistry() != null) {
-      registerHook(HookType.POST_EXEC_DEV, "__zeppelin__._displayhook()");
+      try {
+        registerHook(HookType.POST_EXEC_DEV.getName(), "__zeppelin__._displayhook()");
+      } catch (InvalidHookException e) {
+        throw new InterpreterException(e);
+      }
     }
     DepInterpreter depInterpreter = getDepInterpreter();
 
@@ -212,12 +204,17 @@ public class PySparkInterpreter extends Interpreter implements ExecuteResultHand
 
     // only set PYTHONPATH in local or yarn-client mode.
     // yarn-cluster will setup PYTHONPATH automatically.
-    SparkConf conf = getSparkConf();
+    SparkConf conf = null;
+    try {
+      conf = getSparkConf();
+    } catch (InterpreterException e) {
+      throw new IOException(e);
+    }
     if (!conf.get("spark.submit.deployMode", "client").equals("cluster")) {
       if (!env.containsKey("PYTHONPATH")) {
         env.put("PYTHONPATH", PythonUtils.sparkPythonPath());
       } else {
-        env.put("PYTHONPATH", PythonUtils.sparkPythonPath());
+        env.put("PYTHONPATH", PythonUtils.sparkPythonPath() + ":" + env.get("PYTHONPATH"));
       }
     }
 
@@ -225,20 +222,17 @@ public class PySparkInterpreter extends Interpreter implements ExecuteResultHand
     // also, add all packages to PYTHONPATH since there might be transitive dependencies
     if (SparkInterpreter.useSparkSubmit() &&
         !getSparkInterpreter().isYarnMode()) {
-
-      String sparkSubmitJars = getSparkConf().get("spark.jars").replace(",", ":");
-
-      if (!"".equals(sparkSubmitJars)) {
-        env.put("PYTHONPATH", env.get("PYTHONPATH") + sparkSubmitJars);
+      String sparkSubmitJars = conf.get("spark.jars").replace(",", ":");
+      if (!StringUtils.isEmpty(sparkSubmitJars)) {
+        env.put("PYTHONPATH", env.get("PYTHONPATH") + ":" + sparkSubmitJars);
       }
     }
 
-    LOGGER.info("PYTHONPATH: " + env.get("PYTHONPATH"));
-
     // set PYSPARK_PYTHON
-    if (getSparkConf().contains("spark.pyspark.python")) {
-      env.put("PYSPARK_PYTHON", getSparkConf().get("spark.pyspark.python"));
+    if (conf.contains("spark.pyspark.python")) {
+      env.put("PYSPARK_PYTHON", conf.get("spark.pyspark.python"));
     }
+    LOGGER.info("PYTHONPATH: " + env.get("PYTHONPATH"));
     return env;
   }
 
@@ -406,16 +400,16 @@ public class PySparkInterpreter extends Interpreter implements ExecuteResultHand
   @Override
   public InterpreterResult interpret(String st, InterpreterContext context)
       throws InterpreterException {
+    if (iPySparkInterpreter != null) {
+      return iPySparkInterpreter.interpret(st, context);
+    }
+
     SparkInterpreter sparkInterpreter = getSparkInterpreter();
-    sparkInterpreter.populateSparkWebUrl(context);
     if (sparkInterpreter.isUnsupportedSparkVersion()) {
       return new InterpreterResult(Code.ERROR, "Spark "
           + sparkInterpreter.getSparkVersion().toString() + " is not supported");
     }
-
-    if (iPySparkInterpreter != null) {
-      return iPySparkInterpreter.interpret(st, context);
-    }
+    sparkInterpreter.populateSparkWebUrl(context);
 
     if (!pythonscriptRunning) {
       return new InterpreterResult(Code.ERROR, "python process not running"
@@ -467,10 +461,13 @@ public class PySparkInterpreter extends Interpreter implements ExecuteResultHand
     }
     String jobGroup = Utils.buildJobGroupId(context);
     String jobDesc = "Started by: " + Utils.getUserName(context.getAuthenticationInfo());
+
     SparkZeppelinContext __zeppelin__ = sparkInterpreter.getZeppelinContext();
     __zeppelin__.setInterpreterContext(context);
     __zeppelin__.setGui(context.getGui());
     __zeppelin__.setNoteGui(context.getNoteGui());
+    InterpreterContext.set(context);
+
     pythonInterpretRequest = new PythonInterpretRequest(st, jobGroup, jobDesc);
     statementOutput = null;
 
