@@ -38,7 +38,8 @@ import scala.util.control.NonFatal
   * @param depFiles
   */
 abstract class BaseSparkScalaInterpreter(val conf: SparkConf,
-                                         val depFiles: java.util.List[String]) {
+                                         val depFiles: java.util.List[String],
+                                         val printReplOutput: java.lang.Boolean) {
 
   protected lazy val LOGGER: Logger = LoggerFactory.getLogger(getClass)
 
@@ -108,9 +109,6 @@ abstract class BaseSparkScalaInterpreter(val conf: SparkConf,
   protected def close(): Unit = {
     if (sc != null) {
       sc.stop()
-    }
-    if (sparkHttpServer != null) {
-      sparkHttpServer.getClass.getMethod("stop").invoke(sparkHttpServer)
     }
     sc = null
     sqlContext = null

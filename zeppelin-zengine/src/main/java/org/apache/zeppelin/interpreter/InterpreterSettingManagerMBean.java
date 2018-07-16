@@ -15,25 +15,13 @@
  * limitations under the License.
  */
 
+package org.apache.zeppelin.interpreter;
 
-package org.apache.zeppelin.spark;
-
-import org.apache.spark.SparkContext;
-import org.apache.spark.scheduler.SparkListener;
-import org.apache.spark.scheduler.SparkListenerJobStart;
+import java.util.Set;
 
 /**
- * Shims for Spark 2.x
+ * MBean for InterpreterSettingManager
  */
-public class Spark2Shims extends SparkShims {
-
-  public void setupSparkListener(final String master, final String sparkWebUrl) {
-    SparkContext sc = SparkContext.getOrCreate();
-    sc.addSparkListener(new SparkListener() {
-      @Override
-      public void onJobStart(SparkListenerJobStart jobStart) {
-        buildSparkJobUrl(master, sparkWebUrl, jobStart.jobId(), jobStart.properties());
-      }
-    });
-  }
+public interface InterpreterSettingManagerMBean {
+  Set<String> getRunningInterpreters();
 }

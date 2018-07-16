@@ -30,7 +30,6 @@ import java.util.regex.Pattern;
 import javax.servlet.http.HttpServletRequest;
 
 import org.apache.commons.lang.StringUtils;
-import org.apache.commons.vfs2.FileSystemException;
 import org.apache.zeppelin.conf.ZeppelinConfiguration;
 import org.apache.zeppelin.conf.ZeppelinConfiguration.ConfVars;
 import org.apache.zeppelin.display.*;
@@ -84,7 +83,7 @@ import com.google.gson.reflect.TypeToken;
  */
 public class NotebookServer extends WebSocketServlet
     implements NotebookSocketListener, JobListenerFactory, AngularObjectRegistryListener,
-    RemoteInterpreterProcessListener, ApplicationEventListener {
+    RemoteInterpreterProcessListener, ApplicationEventListener, NotebookServerMBean {
 
   /**
    * Job manager service type
@@ -466,6 +465,18 @@ public class NotebookServer extends WebSocketServlet
       for (String id : ids) {
         if (id.equals(interpreterGroupId)) {
           broadcast(note.getId(), m);
+        }
+      }
+    }
+  }
+
+  public void broadcast(Message m) {
+    synchronized (connectedSockets) {
+      for (NotebookSocket ns : connectedSockets) {
+        try {
+          ns.send(serializeMessage(m));
+        } catch (IOException e) {
+          LOG.error("Send error: " + m, e);
         }
       }
     }
@@ -1052,7 +1063,7 @@ public class NotebookServer extends WebSocketServlet
       note.persist(subject);
       addConnectionToNote(note.getId(), (NotebookSocket) conn);
       conn.send(serializeMessage(new Message(OP.NEW_NOTE).put("note", note)));
-    } catch (FileSystemException e) {
+    } catch (IOException e) {
       LOG.error("Exception from createNote", e);
       conn.send(serializeMessage(new Message(OP.ERROR_INFO).put("info",
           "Oops! There is something wrong with the notebook file system. "
@@ -1846,7 +1857,7 @@ public class NotebookServer extends WebSocketServlet
     try {
       note.persist(p.getAuthenticationInfo());
       return true;
-    } catch (FileSystemException ex) {
+    } catch (IOException ex) {
       LOG.error("Exception from run", ex);
       conn.send(serializeMessage(new Message(OP.ERROR_INFO).put("info",
           "Oops! There is something wrong with the notebook file system. "
@@ -2451,12 +2462,14 @@ public class NotebookServer extends WebSocketServlet
         null;
     try {
       interpreter = notebook().getInterpreterFactory().getInterpreter(user, noteId, replName);
+      LOG.debug("getEditorSetting for interpreter: {} for paragraph {}", replName, paragraphId);
+      resp.put("editor", notebook().getInterpreterSettingManager().
+          getEditorSetting(interpreter, user, noteId, replName));
+      conn.send(serializeMessage(resp));
     } catch (InterpreterNotFoundException e) {
-      throw new IOException("Fail to get interpreter: " + replName, e);
+      LOG.warn("Fail to get interpreter: " + replName);
+      return;
     }
-    resp.put("editor", notebook().getInterpreterSettingManager().
-        getEditorSetting(interpreter, user, noteId, replName));
-    conn.send(serializeMessage(resp));
   }
 
   private void getInterpreterSettings(NotebookSocket conn, AuthenticationInfo subject)
@@ -2631,5 +2644,21 @@ public class NotebookServer extends WebSocketServlet
       note.persist(subject);
       broadcastNoteForms(note);
     }
+  }
+
+  @Override
+  public Set<String> getConnectedUsers() {
+    Set<String> connectionList = Sets.newHashSet();
+    for (NotebookSocket notebookSocket : connectedSockets) {
+      connectionList.add(notebookSocket.getUser());
+    }
+    return connectionList;
+  }
+
+  @Override
+  public void sendMessage(String message) {
+    Message m = new Message(OP.NOTICE);
+    m.data.put("notice", message);
+    broadcast(m);
   }
 }
