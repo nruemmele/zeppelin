@@ -19,6 +19,7 @@ package org.apache.zeppelin.spark
 
 
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.{JobProgressUtil, SparkConf, SparkContext}
@@ -59,6 +60,7 @@ abstract class BaseSparkScalaInterpreter(val conf: SparkConf,
 
   protected val interpreterOutput: InterpreterOutputStream
 
+
   protected def open(): Unit = {
     /* Required for scoped mode.
      * In scoped mode multiple scala compiler (repl) generates class in the same directory.
@@ -77,6 +79,8 @@ abstract class BaseSparkScalaInterpreter(val conf: SparkConf,
      *
      */
     System.setProperty("scala.repl.name.line", ("$line" + this.hashCode).replace('-', '0'))
+
+    BaseSparkScalaInterpreter.sessionNum.incrementAndGet()
   }
 
   def interpret(code: String, context: InterpreterContext): InterpreterResult = {
@@ -98,6 +102,7 @@ abstract class BaseSparkScalaInterpreter(val conf: SparkConf,
               errorMsg.contains("value toDS is not a member of org.apache.spark.rdd.RDD")) {
               // prepend "import sqlContext.implicits._" due to
               // https://issues.scala-lang.org/browse/SI-6649
+              context.out.clear()
               scalaInterpret("import sqlContext.implicits._\n" + code)
             } else {
               scala.tools.nsc.interpreter.IR.Error
@@ -152,16 +157,20 @@ abstract class BaseSparkScalaInterpreter(val conf: SparkConf,
     bind(name, tpe, value, modifier.asScala.toList)
 
   protected def close(): Unit = {
-    if (sc != null) {
-      sc.stop()
+    if (BaseSparkScalaInterpreter.sessionNum.decrementAndGet() == 0) {
+      if (sc != null) {
+        sc.stop()
+      }
+      if (sparkHttpServer != null) {
+        sparkHttpServer.getClass.getMethod("stop").invoke(sparkHttpServer)
+      }
+      sc = null
+      sqlContext = null
+      if (sparkSession != null) {
+        sparkSession.getClass.getMethod("stop").invoke(sparkSession)
+        sparkSession = null
+      }
     }
-    sc = null
-    sqlContext = null
-    if (sparkSession != null) {
-      sparkSession.getClass.getMethod("stop").invoke(sparkSession)
-      sparkSession = null
-    }
-
   }
 
   protected def createSparkContext(): Unit = {
@@ -364,12 +373,24 @@ abstract class BaseSparkScalaInterpreter(val conf: SparkConf,
     val sparkJars = conf.getOption("spark.jars").map(_.split(","))
       .map(_.filter(_.nonEmpty)).toSeq.flatten
     val depJars = depFiles.asScala.filter(_.endsWith(".jar"))
-    val result = sparkJars ++ depJars
+    // add zeppelin spark interpreter jar
+    val zeppelinInterpreterJarURL = getClass.getProtectionDomain.getCodeSource.getLocation
+    // zeppelinInterpreterJarURL might be a folder when under unit testing
+    val result = if (new File(zeppelinInterpreterJarURL.getFile).isDirectory) {
+      sparkJars ++ depJars
+    } else {
+      sparkJars ++ depJars ++ Seq(zeppelinInterpreterJarURL.getFile)
+    }
     conf.set("spark.jars", result.mkString(","))
+    LOGGER.debug("User jar for spark repl: " + conf.get("spark.jars"))
     result
   }
 
   protected def getUserFiles(): Seq[String] = {
     depFiles.asScala.filter(!_.endsWith(".jar"))
   }
+}
+
+object BaseSparkScalaInterpreter {
+  val sessionNum = new AtomicInteger(0)
 }

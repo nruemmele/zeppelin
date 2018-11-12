@@ -390,7 +390,10 @@ public class JDBCInterpreter extends KerberosInterpreter {
       new DriverManagerConnectionFactory(url, properties);
 
     PoolableConnectionFactory poolableConnectionFactory = new PoolableConnectionFactory(
-      connectionFactory, null);
+        connectionFactory, null);
+    final String maxConnectionLifetime =
+        StringUtils.defaultIfEmpty(getProperty("zeppelin.jdbc.maxConnLifetime"), "-1");
+    poolableConnectionFactory.setMaxConnLifetimeMillis(Long.parseLong(maxConnectionLifetime));
     ObjectPool connectionPool = new GenericObjectPool(poolableConnectionFactory);
 
     poolableConnectionFactory.setPool(connectionPool);
@@ -540,7 +543,11 @@ public class JDBCInterpreter extends KerberosInterpreter {
       if (i > 1) {
         msg.append(TAB);
       }
-      msg.append(replaceReservedChars(md.getColumnName(i)));
+      if (StringUtils.isNotEmpty(md.getColumnLabel(i))) {
+        msg.append(replaceReservedChars(md.getColumnLabel(i)));
+      } else {
+        msg.append(replaceReservedChars(md.getColumnName(i)));
+      }
     }
     msg.append(NEWLINE);
 
